@@ -1,0 +1,82 @@
+Mini Project 1 
+Group Details: 
+Member 1: Aryan Yadav
+Roll number: 23CS10003
+Member 2: Mayank Modi
+Roll number: 23CS10089 
+
+
+1. DATA STRUCTURES (ksocket.h)
+
+- ktp_msg_t (Message Frame format)
+  * seq_no: 8-bit sequence number (1-255) for the message.
+  * is_ack: Boolean flag (1 for ACK, 0 for Data).
+  * rwnd_size: Piggybacked size of the receiver's available buffer.
+  * payload: Fixed 512-byte array containing application data.
+  * payload_len: The actual number of valid data bytes in the payload.
+
+- swnd_t (Sender Window State)
+  * size: Current maximum allowed unacknowledged messages (driven by receiver's rwnd).
+  * count: Number of messages currently in-flight.
+  * next_seq: The sequence number to be assigned to the next outgoing message.
+  * buffer: Array storing copies of in-flight messages for retransmission.
+  * unacked_seq: Array tracking the sequence numbers of the in-flight messages.
+  * send_times: Array of timestamps recording when each slot was transmitted.
+
+- rwnd_t (Receiver Window State)
+  * size: Number of free slots currently available in the receive buffer.
+  * expected_seq: The next strictly in-order sequence number expected.
+  * nospace_flag: Set to 1 when the receive buffer is full; triggers Duplicate ACKs.
+
+- ktp_socket_entry_t (Socket State)
+  * mutex: Process-shared mutex ensuring thread-safe access to the socket state.
+  * is_free: Flag indicating if this shared memory slot is available for use.
+  * pid: The Process ID of the user application that owns this socket.
+  * udp_sockfd: The underlying OS-level UDP socket descriptor (owned by daemon).
+  * local_addr / remote_addr: Structures storing the bound IP and Port network addresses.
+  * is_bound: Flag indicating if the daemon has successfully bound the UDP socket.
+  * send_buffer / send_count: The application's outgoing message staging area.
+  * recv_buffer / recv_count: The application's incoming message staging area.
+  * swnd / rwnd: The sliding window management structures.
+  * total_messages / total_transmissions: Counters used to calculate the average transmissions per message metric.
+
+- shared_memory_t (Global IPC Block)
+  * sockets: Array of MAX_KTP_SOCKETS socket entry structures.
+  * needs_bind: Array of flags set by the library requesting the daemon to bind a socket.
+  * bind_done: Array of flags set by the daemon indicating a bind attempt finished.
+  * bind_result: Array storing the return value (0 or error) of the daemon's bind attempt.
+
+
+2. FUNCTIONS
+
+Library API (ksocket.c):
+- attach_shm(): Lazily requests and attaches the user process to the global IPC shared memory segment.
+- dropMessage(p): Simulates packet loss by returning 1 with probability 'p' using a randomized float check.
+- k_socket(): Scans shared memory for a free socket entry, locks it, assigns the calling PID, and initializes all window and buffer variables to default states.
+- k_bind(): Writes network addresses into the shared memory slot, sets the 'needs_bind' flag, and polls until the daemon updates the 'bind_done' flag.
+- k_sendto(): Validates address matching and buffer space, formats the application data into a ktp_msg_t, increments the message counter, and appends it to the send_buffer.
+- k_recvfrom(): Checks the recv_buffer for in-order messages, copies the payload to the application, shifts remaining buffer items, and increments the receiver window size.
+- k_close(): Polls the shared memory until the send_buffer and in-flight window are completely empty, prints the final transmission statistics, and marks the slot as free.
+
+Daemon Process (initksocket.c):
+- init_attach_shm(): Creates the global IPC shared memory segment using shmget and attaches it to the daemon process.
+- bind_handler() [Thread]: Polls the 'needs_bind' array. When flagged, it creates a raw UDP socket, calls the OS bind() function, saves the file descriptor, and signals completion.
+- thread_R() [Thread]: Uses select() to listen for incoming UDP packets across all active sockets. Simulates network loss, processes forward ACKs to slide the sender window, buffers in-order incoming data, and transmits ACKs (including Duplicate ACKs for out-of-order or full-buffer scenarios).
+- thread_S() [Thread]: Wakes every T/2 seconds. Scans the sender windows to retransmit any unacknowledged frames exceeding timeout T. Then, reads pending messages from the application send buffers, assigns sequence numbers, and transmits them over the network within the allowed window size.
+- garbage_collector() [Thread]: Wakes every 10 seconds. Checks active sockets using kill(pid, 0) to verify the user process is still alive. If dead, it safely resets and reclaims the shared memory slot to prevent resource leaks.
+- main(): Initializes the shared memory block, creates process-shared mutex attributes, resets all socket states, and spawns the background handler threads.
+
+3. PERFORMANCE ANALYSIS (Timeout T = 5s)
+
+| Drop Probability (p) | Average Transmissions per Message |
+|----------------------|-----------------------------------|
+| 0.05                 |        1.212                      |
+| 0.10                 |        1.308                      |
+| 0.15                 |        1.904                      |
+| 0.20                 |        2.214                      |
+| 0.25                 |        2.673                      |
+| 0.30                 |        2.797                      |
+| 0.35                 |        2.913                      |
+| 0.40                 |        3.236                      |
+| 0.45                 |        3.675                      |
+| 0.50                 |        4.134                      |
